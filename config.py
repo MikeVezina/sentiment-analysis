@@ -1,5 +1,8 @@
 import os
 import secret
+from dotenv import load_dotenv
+
+load_dotenv(verbose=True)
 
 project = os.environ["PROJECT"]
 dataset = os.environ["DATASET"]
