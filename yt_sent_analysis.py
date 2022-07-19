@@ -70,7 +70,6 @@ class YoutubeSentimentAnalysis:
         entities_df = DataFrame()
         entity_mentions_df = DataFrame()
 
-
         while comment_count < max_comment_threads:
             comment_items = next(comments_iter, None)
             if comment_items is None or comment_items['items'] is None:
@@ -88,12 +87,17 @@ class YoutubeSentimentAnalysis:
                 entity_mentions_df = pd.concat([entity_mentions_df, entity_men_df], ignore_index=True)
 
         # Write comment thread to DB
+        print("Writing threads")
         self.bq.write_df(self.bq.get_table_id(tables['commentThreads']), threads_df,
                          tab_schema=schemas.comment_threads_schema())
+        print("Writing thread comments")
         self.bq.write_df(self.bq.get_table_id(tables['comments']), comments_df, tab_schema=comments_schema())
+        print("Writing entities")
         self.bq.write_df(self.bq.get_table_id(tables['entities']), entities_df, tab_schema=schemas.entities_schema())
+        print("Writing entity mentions")
         self.bq.write_df(self.bq.get_table_id(tables['entityMentions']), entity_mentions_df,
                          tab_schema=schemas.entities_mentions_schema())
+        print("Video analysis complete. Successfully wrote analysis to BigQuery")
 
     def insert_video(self, upload):
         upload_df = json_normalize(upload, sep='_')
@@ -132,6 +136,30 @@ class YoutubeSentimentAnalysis:
 
         print("Performing analysis on comment thread:", top_level_comment['id'])
 
+        # TODO: Check if comment thread exists and etag is same
+        # TODO: I don't think etag for thread captures comment changes, so no point in checking
+        # existing_thread = self.bq.get_by_id(self.bq.get_table_id(tables['commentThreads']), where={
+        #     'id': thread['id'],
+        #     'etag': thread['etag']
+        # })
+
+        # Find ID + etag (limit 1) => existing (no analysis needed)
+        # Also, want to ensure there is only 1 unique row for ID + etag
+        # if existing_thread:
+        #     print("Skipping thread -- existing thread ID and etag. ID:", thread['id'], ", etag:",
+        #           thread['etag'])
+        #     return thread_df, comments_df, entities_df, entity_mentions_df
+        #  TODO: END Snippet
+
+        existing_thread_id = self.bq.get_by_id(self.bq.get_table_id(tables['commentThreads']), where={
+            'id': thread['id']
+        })
+
+        # Find existing thread ID and remove old info
+        if existing_thread_id:
+            # Remove old thread meta-data and re-analyze individual comments
+            self.bq.remove_where(self.bq.get_table_id(tables['commentThreads']), "id", thread['id'])
+
         # Separate thread data from comments for table
         thread_data = self.filter_dict(thread, filt=['snippet'])
         thread_data['snippet']['topLevelComment_Id'] = top_level_comment['id']
@@ -155,7 +183,35 @@ class YoutubeSentimentAnalysis:
         entity_mentions_df = DataFrame()
 
         for (comment, parent) in all_comments:
-            entities = self.get_comment_ent_sentiment(top_level_comment['snippet']['textOriginal'])
+            # TODO: Check if id and etag exists for comment
+            existing = self.bq.get_by_id(self.bq.get_table_id(tables['comments']), where={
+                'id': comment['id'],
+                'etag': comment['etag']
+            })
+
+            # Find ID + etag (limit 1) => existing (no analysis needed)
+            # Also, want to ensure there is only 1 unique row for ID + etag
+            if existing and existing.total_rows == 1:
+                print("Existing comment and etag. ID:", comment['id'], ", etag:", comment['etag'])
+                continue
+
+            # Find ID only => Remove existing analysis + update
+            id_existing = self.bq.get_by_id(self.bq.get_table_id(tables['comments']), where={
+                'id': comment['id']
+            })
+
+            # Remove existing comment and entity analysis, then re-insert
+            if id_existing:
+                print("Removing existing comment for id:", comment['id'])
+
+                # Remove comment
+                self.bq.remove_where(self.bq.get_table_id(tables['comments']), "id", comment['id'])
+
+                # Remove entity mentions
+                self.bq.remove_where(self.bq.get_table_id(tables['entityMentions']), "comment_id", comment['id'])
+
+            # Process entity
+            entities = self.get_comment_ent_sentiment(comment['snippet']['textOriginal'])
             comment_analysis.append((comment, parent, entities))
 
             comment_df = pd.json_normalize(comment, sep='_')
@@ -190,8 +246,6 @@ class YoutubeSentimentAnalysis:
 
         print("Processed comment thread:", top_level_comment['id'])
         return thread_df, comments_df, entities_df, entity_mentions_df
-
-
 
     def entity_to_dict(self, entity):
         ent_data = {}
@@ -250,5 +304,3 @@ class YoutubeSentimentAnalysis:
         print("Reached max replies:", replies_count)
 
         return all_replies
-
-
